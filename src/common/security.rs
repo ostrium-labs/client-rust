@@ -20,6 +20,11 @@ lazy_static::lazy_static! {
     static ref SCHEME_REG: Regex = Regex::new(r"^\s*(https?://)").unwrap();
 }
 
+/// How often an idle connection is probed (TCP and HTTP/2 keepalive).
+const KEEPALIVE_TIME: Duration = Duration::from_secs(10);
+/// How long a PING may go unanswered before the connection is closed.
+const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(3);
+
 fn check_pem_file(tag: &str, path: &Path) -> Result<File> {
     File::open(path)
         .map_err(|e| internal_err!("failed to open {} to load {}: {:?}", path.display(), tag, e))
@@ -85,10 +90,15 @@ impl SecurityManager {
     where
         Factory: FnOnce(Channel) -> Client,
     {
-        self.connect_inner(addr, None, factory).await
+        self.connect_inner(addr, None, false, factory).await
     }
 
-    /// Connect with an explicit TCP connection timeout.
+    /// Connect to a TiKV store with an explicit TCP connection timeout.
+    ///
+    /// Unlike [`connect`](Self::connect) (PD), the connection is also pinged
+    /// while idle: TiKV's gRPC server accepts that, while PD's (etcd's
+    /// `PermitWithoutStream = false`) answers pings on a connection without
+    /// streams with `GOAWAY too_many_pings`.
     pub(crate) async fn connect_with_timeout<Factory, Client>(
         &self,
         addr: &str,
@@ -98,13 +108,14 @@ impl SecurityManager {
     where
         Factory: FnOnce(Channel) -> Client,
     {
-        self.connect_inner(addr, Some(timeout), factory).await
+        self.connect_inner(addr, Some(timeout), true, factory).await
     }
 
     async fn connect_inner<Factory, Client>(
         &self,
         addr: &str,
         timeout: Option<Duration>,
+        ping_idle: bool,
         factory: Factory,
     ) -> Result<Client>
     where
@@ -116,6 +127,7 @@ impl SecurityManager {
         } else {
             self.default_channel(addr).await?
         };
+        let channel = channel.keep_alive_while_idle(ping_idle);
         let channel = match timeout {
             Some(timeout) => channel.connect_timeout(timeout),
             None => channel,
@@ -168,9 +180,20 @@ impl SecurityManager {
     }
 
     fn endpoint(&self, addr: String) -> Result<Endpoint> {
+        // HTTP/2 keepalive, as client-go's `grpc-keepalive-time` (10 s) and
+        // `grpc-keepalive-timeout` (3 s). tonic only sends PINGs when an
+        // interval is set: before, `keep_alive_timeout` alone had no effect,
+        // so a half-open connection to a TiKV or PD that went away was only
+        // noticed when a request timed out on it. TiKV connections are pinged
+        // while idle too (see `connect_with_timeout`), so the channel a
+        // latency-bound caller (Loam's WAL) comes back to after a quiet spell
+        // is known-good; TiKV's gRPC server accepts pings without data
+        // (`http2_max_ping_strikes` is unlimited there).
         let endpoint = Channel::from_shared(addr)?
-            .tcp_keepalive(Some(Duration::from_secs(10)))
-            .keep_alive_timeout(Duration::from_secs(3));
+            .tcp_nodelay(true)
+            .tcp_keepalive(Some(KEEPALIVE_TIME))
+            .http2_keep_alive_interval(KEEPALIVE_TIME)
+            .keep_alive_timeout(KEEPALIVE_TIMEOUT);
         Ok(endpoint)
     }
 }
