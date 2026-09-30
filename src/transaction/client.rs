@@ -229,6 +229,54 @@ impl Client {
         Ok(self.new_transaction(timestamp, options))
     }
 
+    /// Create a new customized [`Transaction`] that starts at `timestamp`,
+    /// without asking PD for a new one.
+    ///
+    /// [`begin_with_options`](Client::begin_with_options) takes a fresh `start_ts`
+    /// from PD's TSO, one round trip to the PD leader per transaction. A
+    /// latency-bound writer can skip it by reusing a timestamp it already
+    /// holds, typically the commit timestamp of its previous transaction.
+    ///
+    /// This is safe for writes: an optimistic transaction's prewrite (and a
+    /// one-phase commit) fails with a write conflict if any key it writes was
+    /// committed after `timestamp`, and TiKV picks a commit timestamp above
+    /// both `timestamp` and every read it has served, so the transaction
+    /// never commits "in the past". Reads, however, see the data as of
+    /// `timestamp`: anything committed after it by others is invisible. Only
+    /// use a timestamp that is recent enough for the reads the transaction
+    /// makes, and never one below the GC safe point.
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// # use tikv_client::{Config, TransactionClient, TransactionOptions};
+    /// # use futures::prelude::*;
+    /// # futures::executor::block_on(async {
+    /// let client = TransactionClient::new(vec!["192.168.0.100"]).await.unwrap();
+    /// let mut first = client.begin_optimistic().await.unwrap();
+    /// first.put("k".to_owned(), "v1".to_owned()).await.unwrap();
+    /// let commit_ts = first.commit().await.unwrap().unwrap();
+    /// // The next transaction starts at the previous commit: no TSO round trip.
+    /// let mut next = client.begin_with_timestamp(
+    ///     commit_ts,
+    ///     TransactionOptions::new_optimistic().try_one_pc(),
+    /// );
+    /// next.put("k".to_owned(), "v2".to_owned()).await.unwrap();
+    /// next.commit().await.unwrap();
+    /// # });
+    /// ```
+    pub fn begin_with_timestamp(
+        &self,
+        timestamp: Timestamp,
+        options: TransactionOptions,
+    ) -> Transaction {
+        debug!(
+            "began transaction at a given start_ts: {}",
+            timestamp.version()
+        );
+        self.new_transaction(timestamp, options)
+    }
+
     /// Create a new [`Snapshot`](Snapshot) at the given [`Timestamp`](Timestamp).
     pub fn snapshot(&self, timestamp: Timestamp, options: TransactionOptions) -> Snapshot {
         debug!("creating new snapshot");

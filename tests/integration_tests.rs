@@ -191,6 +191,43 @@ async fn txn_pessimistic() -> Result<()> {
     Ok(())
 }
 
+/// A transaction started at a caller-supplied timestamp (the previous commit)
+/// commits without a TSO round trip, and a stale one still detects a write
+/// conflict instead of overwriting a newer commit.
+#[tokio::test]
+#[serial]
+async fn txn_begin_with_timestamp() -> Result<()> {
+    init().await?;
+    let client =
+        TransactionClient::new_with_config(pd_addrs(), Config::default().with_default_keyspace())
+            .await?;
+    let key = "begin_with_timestamp".to_owned();
+
+    let mut first = client.begin_optimistic().await?;
+    first.put(key.clone(), "v1".to_owned()).await?;
+    let ts1 = first.commit().await?.expect("a commit timestamp");
+
+    // Reusing the previous commit timestamp: reads see v1, and it commits.
+    let mut next = client.begin_with_timestamp(
+        ts1.clone(),
+        TransactionOptions::new_optimistic().try_one_pc(),
+    );
+    assert_eq!(next.get(key.clone()).await?, Some("v1".as_bytes().to_vec()));
+    next.put(key.clone(), "v2".to_owned()).await?;
+    let ts2 = next.commit().await?.expect("a commit timestamp");
+    assert!(ts2.version() > ts1.version());
+
+    // Starting below the v2 commit: the write conflicts with it.
+    let mut stale = client.begin_with_timestamp(ts1, TransactionOptions::new_optimistic());
+    stale.put(key.clone(), "v3".to_owned()).await?;
+    assert!(stale.commit().await.is_err());
+
+    let mut check = client.begin_optimistic().await?;
+    assert_eq!(check.get(key).await?, Some("v2".as_bytes().to_vec()));
+    check.rollback().await?;
+    Ok(())
+}
+
 #[tokio::test]
 #[serial]
 async fn txn_split_batch() -> Result<()> {
