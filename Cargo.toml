@@ -30,7 +30,7 @@ async-recursion = "0.3"
 async-trait = "0.1"
 derive-new = "0.5"
 either = "1.6"
-fail = "0.4"
+fail = "0.5"
 futures = { version = "0.3" }
 lazy_static = "1"
 log = "0.4"
@@ -51,7 +51,7 @@ tonic = { version = "0.12", features = ["tls", "gzip"] }
 [dev-dependencies]
 clap = "2"
 env_logger = "0.10"
-fail = { version = "0.4", features = ["failpoints"] }
+fail = { version = "0.5", features = ["failpoints"] }
 proptest = "1"
 proptest-derive = "0.5.1"
 reqwest = { version = "0.11", features = ["json", "native-tls-vendored"] }
